@@ -4,6 +4,8 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem SQL Server forensic table collector for Windows Server 2016+.
 rem This is a single-file BAT/PowerShell hybrid. It requires sqlcmd.exe and bcp.exe.
 rem Authentication uses the Windows identity running this file; no password is stored.
+rem Keep this source strictly 7-bit ASCII for ANSI/OEM code-page compatibility.
+rem Do not add localized text or non-ASCII punctuation to this file.
 
 if "%~1"=="" goto :USAGE
 if /I "%~1"=="/?" goto :USAGE
