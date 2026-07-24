@@ -82,7 +82,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.4.1'
+$script:CollectorVersion = '1.4.2'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
@@ -473,6 +473,23 @@ function Write-HashManifest {
         ('{0} *hashes.tsv{1}' -f $manifestHash, [Environment]::NewLine),
         (New-Object Text.UTF8Encoding($false))
     )
+}
+
+function Show-GeneratedFiles {
+    if (-not $script:RootPath -or -not (Test-Path -LiteralPath $script:RootPath -PathType Container)) {
+        return
+    }
+
+    $rootWithSlash = $script:RootPath.TrimEnd('\') + '\'
+    $files = @(Get-ChildItem -LiteralPath $script:RootPath -File -Recurse | Sort-Object FullName)
+
+    Write-Host ''
+    Write-Host ('Generated files ({0}):' -f $files.Count) -ForegroundColor Cyan
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($rootWithSlash.Length)
+        Write-Host ('  {0,12} bytes  {1}' -f $file.Length, $relative)
+    }
+    Write-Host ('Output directory: {0}' -f $script:RootPath) -ForegroundColor Cyan
 }
 
 function New-DatabaseConnectionString {
@@ -941,6 +958,11 @@ ORDER BY SCHEMA_NAME(t.schema_id), t.name;
         } catch {
             $script:CollectionFailed = $true
             Write-Host ('Could not write SHA-256 manifest: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        }
+        try {
+            Show-GeneratedFiles
+        } catch {
+            Write-Host ('Could not display the generated file list: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
         }
     }
 }
