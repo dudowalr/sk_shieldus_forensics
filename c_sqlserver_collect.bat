@@ -82,7 +82,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.4.0'
+$script:CollectorVersion = '1.4.1'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
@@ -482,20 +482,20 @@ function New-DatabaseConnectionString {
     )
 
     $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-    $builder.DataSource = $Server
-    $builder.InitialCatalog = $Database
-    $builder.ApplicationName = 'DFIR SQL CSV Collector'
-    $builder.ConnectTimeout = 30
-    $builder.Encrypt = $true
-    $builder.TrustServerCertificate = $script:TrustServerCertificate
-    $builder.PersistSecurityInfo = $false
+    $builder['Data Source'] = $Server
+    $builder['Initial Catalog'] = $Database
+    $builder['Application Name'] = 'DFIR SQL CSV Collector'
+    $builder['Connect Timeout'] = 30
+    $builder['Encrypt'] = $true
+    $builder['TrustServerCertificate'] = $script:TrustServerCertificate
+    $builder['Persist Security Info'] = $false
 
     if ($script:UseSqlAuthentication) {
-        $builder.IntegratedSecurity = $false
-        $builder.UserID = $script:SqlUser
-        $builder.Password = $script:SqlPassword
+        $builder['Integrated Security'] = $false
+        $builder['User ID'] = $script:SqlUser
+        $builder['Password'] = $script:SqlPassword
     } else {
-        $builder.IntegratedSecurity = $true
+        $builder['Integrated Security'] = $true
     }
 
     return $builder.ConnectionString
