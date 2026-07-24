@@ -12,15 +12,17 @@ if /I "%~1"=="--help" goto :USAGE
 
 set "DFIR_SQL_SERVER=%~1"
 set "DFIR_SQL_OUTPUT=%~2"
-set "DFIR_SQL_TRUST_CERT=%~3"
+set "DFIR_SQL_OPTION1=%~3"
+set "DFIR_SQL_OPTION2=%~4"
 set "DFIR_SQL_COLLECTOR=%~f0"
 
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $text=[IO.File]::ReadAllText($env:DFIR_SQL_COLLECTOR); $marker=':__POWERSHELL_BELOW__'; $pos=$text.LastIndexOf($marker); if($pos -lt 0){throw 'Embedded PowerShell marker is missing.'}; $code=$text.Substring($pos+$marker.Length); & ([ScriptBlock]::Create($code)) $env:DFIR_SQL_SERVER $env:DFIR_SQL_OUTPUT $env:DFIR_SQL_TRUST_CERT"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $text=[IO.File]::ReadAllText($env:DFIR_SQL_COLLECTOR); $marker=':__POWERSHELL_BELOW__'; $pos=$text.LastIndexOf($marker); if($pos -lt 0){throw 'Embedded PowerShell marker is missing.'}; $code=$text.Substring($pos+$marker.Length); & ([ScriptBlock]::Create($code)) $env:DFIR_SQL_SERVER $env:DFIR_SQL_OUTPUT $env:DFIR_SQL_OPTION1 $env:DFIR_SQL_OPTION2"
 set "DFIR_SQL_RC=%ERRORLEVEL%"
 
 set "DFIR_SQL_SERVER="
 set "DFIR_SQL_OUTPUT="
-set "DFIR_SQL_TRUST_CERT="
+set "DFIR_SQL_OPTION1="
+set "DFIR_SQL_OPTION2="
 set "DFIR_SQL_COLLECTOR="
 exit /b %DFIR_SQL_RC%
 
@@ -29,13 +31,14 @@ echo.
 echo SQL Server forensic table collector
 echo.
 echo Usage:
-echo   %~nx0 SERVER [OUTPUT_DIRECTORY] [--trust-server-certificate]
+echo   %~nx0 SERVER [OUTPUT_DIRECTORY] [--sql-auth] [--trust-server-certificate]
 echo.
 echo Examples:
 echo   %~nx0 SQL01
 echo   %~nx0 "SQL01\INSTANCE" "D:\Evidence\SQL01"
 echo   %~nx0 "tcp:10.10.10.20,1433" "\\EVIDENCE01\Case-001\SQL01"
 echo   %~nx0 "tcp:10.10.10.20,1433" "D:\Evidence\SQL01" --trust-server-certificate
+echo   %~nx0 "tcp:10.10.10.20,1433" "D:\Evidence\SQL01" --sql-auth --trust-server-certificate
 echo.
 echo Requirements:
 echo   - Run under an authorized Windows account with CONNECT and SELECT access.
@@ -55,7 +58,11 @@ param(
 
     [Parameter(Mandatory = $false)]
     [AllowEmptyString()]
-    [string]$TrustServerCertificateOption
+    [string]$Option1,
+
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$Option2
 )
 
 Set-StrictMode -Version 2.0
@@ -63,18 +70,31 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.1.0'
+$script:CollectorVersion = '1.2.1'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
 $script:BcpPath = ''
 $script:TrustServerCertificate = $false
+$script:UseSqlAuthentication = $false
+$script:SqlUser = ''
+$script:SqlPassword = ''
 
-if (-not [String]::IsNullOrWhiteSpace($TrustServerCertificateOption)) {
-    if ($TrustServerCertificateOption -ne '--trust-server-certificate') {
-        throw ('Unknown option: {0}' -f $TrustServerCertificateOption)
+foreach ($option in @($Option1, $Option2)) {
+    if ([String]::IsNullOrWhiteSpace($option)) {
+        continue
     }
-    $script:TrustServerCertificate = $true
+    switch ($option.ToLowerInvariant()) {
+        '--trust-server-certificate' {
+            $script:TrustServerCertificate = $true
+        }
+        '--sql-auth' {
+            $script:UseSqlAuthentication = $true
+        }
+        default {
+            throw ('Unknown option: {0}' -f $option)
+        }
+    }
 }
 
 try {
@@ -242,7 +262,12 @@ function Invoke-SqlcmdToFile {
         [switch]$NoTrim
     )
 
-    $arguments = @('-S', $Server, '-E', '-l', '30', '-b', '-r', '1', '-h', '-1', '-s', "`t", '-u')
+    $arguments = @('-S', $Server, '-l', '30', '-b', '-r', '1', '-h', '-1', '-s', "`t", '-u')
+    if ($script:UseSqlAuthentication) {
+        $arguments += @('-U', $script:SqlUser)
+    } else {
+        $arguments += '-E'
+    }
     if ($script:TrustServerCertificate) {
         $arguments += '-C'
     }
@@ -358,13 +383,17 @@ function Export-Table {
         'queryout',
         $partialPath,
         '-S', $Server,
-        '-T',
         '-d', $Database,
         '-n',
         '-a', '65535',
         '-l', '30',
         '-q'
     )
+    if ($script:UseSqlAuthentication) {
+        $arguments += @('-U', $script:SqlUser, ('-P' + $script:SqlPassword))
+    } else {
+        $arguments += '-T'
+    }
     if ($script:TrustServerCertificate) {
         $arguments += '-u'
     }
@@ -402,6 +431,35 @@ try {
         }
         $Server = 'tcp:' + $tcpEndpoint
         $serverWasNormalized = $true
+    }
+
+    if ($script:UseSqlAuthentication) {
+        $providedSqlUser = [Environment]::GetEnvironmentVariable('DFIR_DB_USER', 'Process')
+        if ([String]::IsNullOrWhiteSpace($providedSqlUser)) {
+            $script:SqlUser = (Read-Host 'SQL Server login').Trim()
+        } else {
+            $script:SqlUser = $providedSqlUser.Trim()
+        }
+        if ([String]::IsNullOrWhiteSpace($script:SqlUser)) {
+            throw 'SQL Server login cannot be empty.'
+        }
+
+        $providedSqlPassword = [Environment]::GetEnvironmentVariable('DFIR_DB_PASSWORD', 'Process')
+        if ([String]::IsNullOrEmpty($providedSqlPassword)) {
+            $securePassword = Read-Host 'SQL Server password' -AsSecureString
+            $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+            try {
+                $script:SqlPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+            } finally {
+                [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+            }
+        } else {
+            $script:SqlPassword = $providedSqlPassword
+        }
+        if ([String]::IsNullOrEmpty($script:SqlPassword)) {
+            throw 'SQL Server password cannot be empty.'
+        }
+        $env:SQLCMDPASSWORD = $script:SqlPassword
     }
 
     if ([String]::IsNullOrWhiteSpace($OutputRoot)) {
@@ -443,6 +501,11 @@ try {
     Write-CollectionLog -Level INFO -Message ('Output directory: {0}' -f $script:RootPath)
     Write-CollectionLog -Level INFO -Message ('sqlcmd: {0}' -f $script:SqlcmdPath)
     Write-CollectionLog -Level INFO -Message ('bcp: {0}' -f $script:BcpPath)
+    if ($script:UseSqlAuthentication) {
+        Write-CollectionLog -Level INFO -Message ('Authentication: SQL Server login ({0})' -f $script:SqlUser)
+    } else {
+        Write-CollectionLog -Level INFO -Message 'Authentication: Windows integrated'
+    }
     if ($script:TrustServerCertificate) {
         Write-CollectionLog -Level WARN -Message 'Server certificate validation is bypassed for this collection.'
     }
@@ -459,6 +522,8 @@ try {
         ("collection_started`t{0}" -f [DateTimeOffset]::Now.ToString('o')),
         ("sqlcmd_path`t{0}" -f $script:SqlcmdPath),
         ("bcp_path`t{0}" -f $script:BcpPath),
+        ("authentication_mode`t{0}" -f $(if ($script:UseSqlAuthentication) { 'sql_login' } else { 'windows_integrated' })),
+        ("sql_login`t{0}" -f $(if ($script:UseSqlAuthentication) { $script:SqlUser } else { '' })),
         ("trust_server_certificate`t{0}" -f $script:TrustServerCertificate)
     )
     [IO.File]::WriteAllLines($hostMetadataPath, $hostMetadata, (New-Object Text.UTF8Encoding($true)))
@@ -698,6 +763,8 @@ ORDER BY SCHEMA_NAME(t.schema_id), t.name;
         Write-Host ('Fatal error: {0}' -f $fatalMessage) -ForegroundColor Red
     }
 } finally {
+    $env:SQLCMDPASSWORD = $null
+    $script:SqlPassword = ''
     if ($script:RootPath -and (Test-Path -LiteralPath $script:RootPath -PathType Container)) {
         try {
             Write-HashManifest
