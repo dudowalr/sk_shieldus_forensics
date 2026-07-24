@@ -82,7 +82,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.3.0'
+$script:CollectorVersion = '1.4.0'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
@@ -113,6 +113,119 @@ try {
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 } catch {
     # Console encoding does not affect evidence files.
+}
+
+$csvWriterSource = @'
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.Data.SqlTypes;
+using System.Globalization;
+using System.IO;
+using System.Text;
+
+public static class DfirStreamingCsvWriter
+{
+    public static long ExportQuery(string connectionString, string query, string outputPath)
+    {
+        using (SqlConnection connection = new SqlConnection(connectionString))
+        using (SqlCommand command = new SqlCommand(query, connection))
+        {
+            command.CommandTimeout = 0;
+            connection.Open();
+            using (SqlDataReader reader = command.ExecuteReader(CommandBehavior.SequentialAccess))
+            {
+                return WriteReader(reader, outputPath);
+            }
+        }
+    }
+
+    public static long WriteReader(IDataReader reader, string outputPath)
+    {
+        long rowCount = 0;
+        UTF8Encoding encoding = new UTF8Encoding(true);
+        using (StreamWriter writer = new StreamWriter(outputPath, false, encoding, 1048576))
+        {
+            writer.NewLine = "\r\n";
+
+            for (int column = 0; column < reader.FieldCount; column++)
+            {
+                if (column > 0) writer.Write(',');
+                WriteCell(writer, reader.GetName(column));
+            }
+            writer.WriteLine();
+
+            while (reader.Read())
+            {
+                for (int column = 0; column < reader.FieldCount; column++)
+                {
+                    if (column > 0) writer.Write(',');
+                    object value = reader.GetValue(column);
+                    WriteCell(writer, FormatValue(value));
+                }
+                writer.WriteLine();
+                rowCount++;
+            }
+        }
+        return rowCount;
+    }
+
+    private static void WriteCell(TextWriter writer, string value)
+    {
+        writer.Write('"');
+        if (value != null)
+        {
+            writer.Write(value.Replace("\"", "\"\""));
+        }
+        writer.Write('"');
+    }
+
+    private static string FormatValue(object value)
+    {
+        if (value == null || value == DBNull.Value) return String.Empty;
+
+        INullable nullable = value as INullable;
+        if (nullable != null && nullable.IsNull) return String.Empty;
+
+        byte[] bytes = value as byte[];
+        if (bytes != null) return "base64:" + Convert.ToBase64String(bytes);
+
+        SqlBinary sqlBinary = value is SqlBinary ? (SqlBinary)value : SqlBinary.Null;
+        if (!sqlBinary.IsNull) return "base64:" + Convert.ToBase64String(sqlBinary.Value);
+
+        SqlBytes sqlBytes = value as SqlBytes;
+        if (sqlBytes != null && !sqlBytes.IsNull)
+            return "base64:" + Convert.ToBase64String(sqlBytes.Value);
+
+        SqlChars sqlChars = value as SqlChars;
+        if (sqlChars != null && !sqlChars.IsNull) return new String(sqlChars.Value);
+
+        SqlXml sqlXml = value as SqlXml;
+        if (sqlXml != null && !sqlXml.IsNull) return sqlXml.Value;
+
+        if (value is DateTime)
+            return ((DateTime)value).ToString("o", CultureInfo.InvariantCulture);
+        if (value is DateTimeOffset)
+            return ((DateTimeOffset)value).ToString("o", CultureInfo.InvariantCulture);
+        if (value is TimeSpan)
+            return ((TimeSpan)value).ToString("c", CultureInfo.InvariantCulture);
+
+        char[] characters = value as char[];
+        if (characters != null) return new String(characters);
+
+        IFormattable formattable = value as IFormattable;
+        if (formattable != null)
+            return formattable.ToString(null, CultureInfo.InvariantCulture);
+
+        return value.ToString();
+    }
+}
+'@
+
+try {
+    Add-Type -TypeDefinition $csvWriterSource -ReferencedAssemblies @('System.dll', 'System.Data.dll', 'System.Xml.dll') -ErrorAction Stop
+} catch {
+    throw ('Could not initialize the streaming CSV writer: {0}' -f $_.Exception.Message)
 }
 
 function ConvertTo-SafeFileName {
@@ -362,6 +475,32 @@ function Write-HashManifest {
     )
 }
 
+function New-DatabaseConnectionString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Database
+    )
+
+    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+    $builder.DataSource = $Server
+    $builder.InitialCatalog = $Database
+    $builder.ApplicationName = 'DFIR SQL CSV Collector'
+    $builder.ConnectTimeout = 30
+    $builder.Encrypt = $true
+    $builder.TrustServerCertificate = $script:TrustServerCertificate
+    $builder.PersistSecurityInfo = $false
+
+    if ($script:UseSqlAuthentication) {
+        $builder.IntegratedSecurity = $false
+        $builder.UserID = $script:SqlUser
+        $builder.Password = $script:SqlPassword
+    } else {
+        $builder.IntegratedSecurity = $true
+    }
+
+    return $builder.ConnectionString
+}
+
 function Export-Table {
     param(
         [Parameter(Mandatory = $true)]
@@ -375,6 +514,9 @@ function Export-Table {
 
         [Parameter(Mandatory = $true)]
         [string]$DataDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CsvDirectory,
 
         [Parameter(Mandatory = $true)]
         [string]$LogDirectory
@@ -417,8 +559,23 @@ function Export-Table {
         Write-CollectionLog -Level INFO -Message ('Completed {0} / {1} ({2} bytes)' -f $Database, $objectName, $length)
     } catch {
         $message = $_.Exception.Message
-        Add-Failure -Stage 'table_export' -Database $Database -Object $objectName -Message $message
-        Write-CollectionLog -Level ERROR -Message ('Failed {0} / {1}: {2}' -f $Database, $objectName, $message)
+        Add-Failure -Stage 'bcp_export' -Database $Database -Object $objectName -Message $message
+        Write-CollectionLog -Level ERROR -Message ('BCP failed {0} / {1}: {2}' -f $Database, $objectName, $message)
+    }
+
+    $csvFinalPath = Join-Path $CsvDirectory ($baseName + '.csv')
+    $csvPartialPath = $csvFinalPath + '.partial'
+    Write-CollectionLog -Level INFO -Message ('Exporting CSV {0} / {1}' -f $Database, $objectName)
+    try {
+        $connectionString = New-DatabaseConnectionString -Database $Database
+        $csvRowCount = [DfirStreamingCsvWriter]::ExportQuery($connectionString, $query, $csvPartialPath)
+        Move-Item -LiteralPath $csvPartialPath -Destination $csvFinalPath
+        $csvLength = (Get-Item -LiteralPath $csvFinalPath).Length
+        Write-CollectionLog -Level INFO -Message ('Completed CSV {0} / {1} ({2} rows, {3} bytes)' -f $Database, $objectName, $csvRowCount, $csvLength)
+    } catch {
+        $message = $_.Exception.Message
+        Add-Failure -Stage 'csv_export' -Database $Database -Object $objectName -Message $message
+        Write-CollectionLog -Level ERROR -Message ('CSV failed {0} / {1}: {2}' -f $Database, $objectName, $message)
     }
 }
 
@@ -630,8 +787,10 @@ ORDER BY name;
         $databaseDirectoryName = '{0}__{1}' -f (ConvertTo-SafeFileName $database 80), $databaseHash
         $databaseDirectory = Join-Path $script:RootPath $databaseDirectoryName
         $dataDirectory = Join-Path $databaseDirectory 'tables'
+        $csvDirectory = Join-Path $databaseDirectory 'csv'
         $bcpLogDirectory = Join-Path $databaseDirectory 'bcp_logs'
         [void](New-Item -ItemType Directory -Path $dataDirectory -Force)
+        [void](New-Item -ItemType Directory -Path $csvDirectory -Force)
         [void](New-Item -ItemType Directory -Path $bcpLogDirectory -Force)
 
         Write-CollectionLog -Level INFO -Message ('Enumerating database: {0}' -f $database)
@@ -747,7 +906,7 @@ ORDER BY SCHEMA_NAME(t.schema_id), t.name;
                 }
                 $schema = ConvertFrom-SqlUnicodeHex $parts[0]
                 $table = ConvertFrom-SqlUnicodeHex $parts[1]
-                Export-Table -Database $database -Schema $schema -Table $table -DataDirectory $dataDirectory -LogDirectory $bcpLogDirectory
+                Export-Table -Database $database -Schema $schema -Table $table -DataDirectory $dataDirectory -CsvDirectory $csvDirectory -LogDirectory $bcpLogDirectory
             }
         } catch {
             $message = $_.Exception.Message
