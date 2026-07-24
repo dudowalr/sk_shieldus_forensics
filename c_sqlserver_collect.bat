@@ -12,13 +12,15 @@ if /I "%~1"=="--help" goto :USAGE
 
 set "DFIR_SQL_SERVER=%~1"
 set "DFIR_SQL_OUTPUT=%~2"
+set "DFIR_SQL_TRUST_CERT=%~3"
 set "DFIR_SQL_COLLECTOR=%~f0"
 
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $text=[IO.File]::ReadAllText($env:DFIR_SQL_COLLECTOR); $marker=':__POWERSHELL_BELOW__'; $pos=$text.LastIndexOf($marker); if($pos -lt 0){throw 'Embedded PowerShell marker is missing.'}; $code=$text.Substring($pos+$marker.Length); & ([ScriptBlock]::Create($code)) -Server $env:DFIR_SQL_SERVER -OutputRoot $env:DFIR_SQL_OUTPUT"
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $text=[IO.File]::ReadAllText($env:DFIR_SQL_COLLECTOR); $marker=':__POWERSHELL_BELOW__'; $pos=$text.LastIndexOf($marker); if($pos -lt 0){throw 'Embedded PowerShell marker is missing.'}; $code=$text.Substring($pos+$marker.Length); & ([ScriptBlock]::Create($code)) $env:DFIR_SQL_SERVER $env:DFIR_SQL_OUTPUT $env:DFIR_SQL_TRUST_CERT"
 set "DFIR_SQL_RC=%ERRORLEVEL%"
 
 set "DFIR_SQL_SERVER="
 set "DFIR_SQL_OUTPUT="
+set "DFIR_SQL_TRUST_CERT="
 set "DFIR_SQL_COLLECTOR="
 exit /b %DFIR_SQL_RC%
 
@@ -27,12 +29,13 @@ echo.
 echo SQL Server forensic table collector
 echo.
 echo Usage:
-echo   %~nx0 SERVER [OUTPUT_DIRECTORY]
+echo   %~nx0 SERVER [OUTPUT_DIRECTORY] [--trust-server-certificate]
 echo.
 echo Examples:
 echo   %~nx0 SQL01
 echo   %~nx0 "SQL01\INSTANCE" "D:\Evidence\SQL01"
 echo   %~nx0 "tcp:10.10.10.20,1433" "\\EVIDENCE01\Case-001\SQL01"
+echo   %~nx0 "tcp:10.10.10.20,1433" "D:\Evidence\SQL01" --trust-server-certificate
 echo.
 echo Requirements:
 echo   - Run under an authorized Windows account with CONNECT and SELECT access.
@@ -48,7 +51,11 @@ param(
 
     [Parameter(Mandatory = $false)]
     [AllowEmptyString()]
-    [string]$OutputRoot
+    [string]$OutputRoot,
+
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$TrustServerCertificateOption
 )
 
 Set-StrictMode -Version 2.0
@@ -56,11 +63,19 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.0.1'
+$script:CollectorVersion = '1.1.0'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
 $script:BcpPath = ''
+$script:TrustServerCertificate = $false
+
+if (-not [String]::IsNullOrWhiteSpace($TrustServerCertificateOption)) {
+    if ($TrustServerCertificateOption -ne '--trust-server-certificate') {
+        throw ('Unknown option: {0}' -f $TrustServerCertificateOption)
+    }
+    $script:TrustServerCertificate = $true
+}
 
 try {
     [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -228,6 +243,9 @@ function Invoke-SqlcmdToFile {
     )
 
     $arguments = @('-S', $Server, '-E', '-l', '30', '-b', '-r', '1', '-h', '-1', '-s', "`t", '-u')
+    if ($script:TrustServerCertificate) {
+        $arguments += '-C'
+    }
     if (-not $NoTrim) {
         $arguments += '-W'
     }
@@ -347,6 +365,9 @@ function Export-Table {
         '-l', '30',
         '-q'
     )
+    if ($script:TrustServerCertificate) {
+        $arguments += '-u'
+    }
 
     try {
         [void](Invoke-External -FilePath $script:BcpPath -Arguments $arguments -CommandLogPath $commandLogPath)
@@ -422,6 +443,9 @@ try {
     Write-CollectionLog -Level INFO -Message ('Output directory: {0}' -f $script:RootPath)
     Write-CollectionLog -Level INFO -Message ('sqlcmd: {0}' -f $script:SqlcmdPath)
     Write-CollectionLog -Level INFO -Message ('bcp: {0}' -f $script:BcpPath)
+    if ($script:TrustServerCertificate) {
+        Write-CollectionLog -Level WARN -Message 'Server certificate validation is bypassed for this collection.'
+    }
 
     $hostMetadataPath = Join-Path $script:RootPath 'collector_host.tsv'
     $hostMetadata = @(
@@ -434,7 +458,8 @@ try {
         ("target_server`t{0}" -f $Server),
         ("collection_started`t{0}" -f [DateTimeOffset]::Now.ToString('o')),
         ("sqlcmd_path`t{0}" -f $script:SqlcmdPath),
-        ("bcp_path`t{0}" -f $script:BcpPath)
+        ("bcp_path`t{0}" -f $script:BcpPath),
+        ("trust_server_certificate`t{0}" -f $script:TrustServerCertificate)
     )
     [IO.File]::WriteAllLines($hostMetadataPath, $hostMetadata, (New-Object Text.UTF8Encoding($true)))
 
