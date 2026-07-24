@@ -14,15 +14,19 @@ set "DFIR_SQL_SERVER=%~1"
 set "DFIR_SQL_OUTPUT=%~2"
 set "DFIR_SQL_OPTION1=%~3"
 set "DFIR_SQL_OPTION2=%~4"
+set "DFIR_SQL_LOGIN=%~5"
+set "DFIR_SQL_PASSWORD=%~6"
 set "DFIR_SQL_COLLECTOR=%~f0"
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $text=[IO.File]::ReadAllText($env:DFIR_SQL_COLLECTOR); $marker=':__POWERSHELL_BELOW__'; $pos=$text.LastIndexOf($marker); if($pos -lt 0){throw 'Embedded PowerShell marker is missing.'}; $code=$text.Substring($pos+$marker.Length); & ([ScriptBlock]::Create($code)) $env:DFIR_SQL_SERVER $env:DFIR_SQL_OUTPUT $env:DFIR_SQL_OPTION1 $env:DFIR_SQL_OPTION2"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $text=[IO.File]::ReadAllText($env:DFIR_SQL_COLLECTOR); $marker=':__POWERSHELL_BELOW__'; $pos=$text.LastIndexOf($marker); if($pos -lt 0){throw 'Embedded PowerShell marker is missing.'}; $code=$text.Substring($pos+$marker.Length); & ([ScriptBlock]::Create($code)) $env:DFIR_SQL_SERVER $env:DFIR_SQL_OUTPUT $env:DFIR_SQL_OPTION1 $env:DFIR_SQL_OPTION2 $env:DFIR_SQL_LOGIN $env:DFIR_SQL_PASSWORD"
 set "DFIR_SQL_RC=%ERRORLEVEL%"
 
 set "DFIR_SQL_SERVER="
 set "DFIR_SQL_OUTPUT="
 set "DFIR_SQL_OPTION1="
 set "DFIR_SQL_OPTION2="
+set "DFIR_SQL_LOGIN="
+set "DFIR_SQL_PASSWORD="
 set "DFIR_SQL_COLLECTOR="
 exit /b %DFIR_SQL_RC%
 
@@ -31,14 +35,14 @@ echo.
 echo SQL Server forensic table collector
 echo.
 echo Usage:
-echo   %~nx0 SERVER [OUTPUT_DIRECTORY] [--sql-auth] [--trust-server-certificate]
+echo   %~nx0 SERVER OUTPUT_DIRECTORY --sql-auth [--trust-server-certificate] SQL_LOGIN SQL_PASSWORD
 echo.
 echo Examples:
 echo   %~nx0 SQL01
 echo   %~nx0 "SQL01\INSTANCE" "D:\Evidence\SQL01"
 echo   %~nx0 "tcp:10.10.10.20,1433" "\\EVIDENCE01\Case-001\SQL01"
 echo   %~nx0 "tcp:10.10.10.20,1433" "D:\Evidence\SQL01" --trust-server-certificate
-echo   %~nx0 "tcp:10.10.10.20,1433" "D:\Evidence\SQL01" --sql-auth --trust-server-certificate
+echo   %~nx0 "tcp:10.10.10.20,1433" "D:\Evidence\SQL01" --sql-auth --trust-server-certificate "collector" "password"
 echo.
 echo Requirements:
 echo   - Run under an authorized Windows account with CONNECT and SELECT access.
@@ -62,7 +66,15 @@ param(
 
     [Parameter(Mandatory = $false)]
     [AllowEmptyString()]
-    [string]$Option2
+    [string]$Option2,
+
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$SqlLoginArgument,
+
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string]$SqlPasswordArgument
 )
 
 Set-StrictMode -Version 2.0
@@ -70,7 +82,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.2.1'
+$script:CollectorVersion = '1.3.0'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
@@ -434,18 +446,16 @@ try {
     }
 
     if ($script:UseSqlAuthentication) {
-        $providedSqlUser = [Environment]::GetEnvironmentVariable('DFIR_DB_USER', 'Process')
-        if ([String]::IsNullOrWhiteSpace($providedSqlUser)) {
+        if ([String]::IsNullOrWhiteSpace($SqlLoginArgument)) {
             $script:SqlUser = (Read-Host 'SQL Server login').Trim()
         } else {
-            $script:SqlUser = $providedSqlUser.Trim()
+            $script:SqlUser = $SqlLoginArgument.Trim()
         }
         if ([String]::IsNullOrWhiteSpace($script:SqlUser)) {
             throw 'SQL Server login cannot be empty.'
         }
 
-        $providedSqlPassword = [Environment]::GetEnvironmentVariable('DFIR_DB_PASSWORD', 'Process')
-        if ([String]::IsNullOrEmpty($providedSqlPassword)) {
+        if ([String]::IsNullOrEmpty($SqlPasswordArgument)) {
             $securePassword = Read-Host 'SQL Server password' -AsSecureString
             $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
             try {
@@ -454,7 +464,7 @@ try {
                 [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
             }
         } else {
-            $script:SqlPassword = $providedSqlPassword
+            $script:SqlPassword = $SqlPasswordArgument
         }
         if ([String]::IsNullOrEmpty($script:SqlPassword)) {
             throw 'SQL Server password cannot be empty.'
