@@ -4,8 +4,6 @@ setlocal EnableExtensions DisableDelayedExpansion
 rem SQL Server forensic table collector for Windows Server 2016+.
 rem This is a single-file BAT/PowerShell hybrid. It requires sqlcmd.exe and bcp.exe.
 rem Authentication uses the Windows identity running this file; no password is stored.
-rem Keep this source strictly 7-bit ASCII for ANSI/OEM code-page compatibility.
-rem Do not add localized text or non-ASCII punctuation to this file.
 
 if "%~1"=="" goto :USAGE
 if /I "%~1"=="/?" goto :USAGE
@@ -58,7 +56,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:CollectionFailed = $false
 $script:FailureRecords = New-Object 'System.Collections.Generic.List[string]'
-$script:CollectorVersion = '1.0.0'
+$script:CollectorVersion = '1.0.1'
 $script:RootPath = ''
 $script:LogPath = ''
 $script:SqlcmdPath = ''
@@ -237,7 +235,22 @@ function Invoke-SqlcmdToFile {
         $arguments += @('-d', $Database)
     }
     $arguments += @('-Q', $Query, '-o', $Path)
-    [void](Invoke-External -FilePath $script:SqlcmdPath -Arguments $arguments)
+    try {
+        [void](Invoke-External -FilePath $script:SqlcmdPath -Arguments $arguments)
+    } catch {
+        $detail = ''
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            try {
+                $detail = (@(Get-Content -LiteralPath $Path -Encoding Unicode) -join ' | ').Trim()
+            } catch {
+                $detail = ''
+            }
+        }
+        if ($detail) {
+            throw ('{0} sqlcmd output: {1}' -f $_.Exception.Message, $detail)
+        }
+        throw
+    }
 }
 
 function Read-UnicodeLines {
@@ -348,8 +361,27 @@ function Export-Table {
 }
 
 try {
-    $script:SqlcmdPath = (Get-Command sqlcmd.exe -ErrorAction Stop).Source
     $script:BcpPath = (Get-Command bcp.exe -ErrorAction Stop).Source
+    $pairedSqlcmdPath = Join-Path (Split-Path -Parent $script:BcpPath) 'sqlcmd.exe'
+    if (Test-Path -LiteralPath $pairedSqlcmdPath -PathType Leaf) {
+        $script:SqlcmdPath = $pairedSqlcmdPath
+    } else {
+        $script:SqlcmdPath = (Get-Command sqlcmd.exe -ErrorAction Stop).Source
+        if ($script:SqlcmdPath -match '(?i)\\Program Files\\SqlCmd\\sqlcmd\.exe$') {
+            throw ('The standalone Go sqlcmd was found, but the ODBC sqlcmd is required. Install MsSqlCmdLnUtils.msi or place its Tools\Binn directory first in PATH. Found: {0}' -f $script:SqlcmdPath)
+        }
+    }
+
+    $originalServer = $Server
+    $serverWasNormalized = $false
+    if ($Server -match '(?i)^tcp://') {
+        $tcpEndpoint = $Server.Substring(6)
+        if ($tcpEndpoint -match '^([^:]+):([0-9]+)$') {
+            $tcpEndpoint = $matches[1] + ',' + $matches[2]
+        }
+        $Server = 'tcp:' + $tcpEndpoint
+        $serverWasNormalized = $true
+    }
 
     if ([String]::IsNullOrWhiteSpace($OutputRoot)) {
         $collectorDirectory = Split-Path -Parent $env:DFIR_SQL_COLLECTOR
@@ -384,6 +416,9 @@ try {
     Write-CollectionLog -Level INFO -Message ('Collector host: {0}' -f $env:COMPUTERNAME)
     Write-CollectionLog -Level INFO -Message ('Collector identity: {0}' -f [Security.Principal.WindowsIdentity]::GetCurrent().Name)
     Write-CollectionLog -Level INFO -Message ('Target SQL Server: {0}' -f $Server)
+    if ($serverWasNormalized) {
+        Write-CollectionLog -Level WARN -Message ('Normalized target syntax from {0} to {1}' -f $originalServer, $Server)
+    }
     Write-CollectionLog -Level INFO -Message ('Output directory: {0}' -f $script:RootPath)
     Write-CollectionLog -Level INFO -Message ('sqlcmd: {0}' -f $script:SqlcmdPath)
     Write-CollectionLog -Level INFO -Message ('bcp: {0}' -f $script:BcpPath)
