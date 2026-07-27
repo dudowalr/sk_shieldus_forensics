@@ -5,9 +5,11 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "next dev -H 192.168.223.143 -p 3000",
+    "dev": "next dev -H 127.0.0.1 -p 3001",
     "build": "next build",
-    "start": "next start -H 192.168.223.143 -p 3000"
+    "start:next": "next start -H 127.0.0.1 -p 3001",
+    "start": "node start-lab.js",
+    "logger": "node logger-proxy.js"
   },
   "keywords": [],
   "author": "",

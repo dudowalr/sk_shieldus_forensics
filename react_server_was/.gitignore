@@ -1,6 +1,7 @@
 node_modules/
 .next/
 out/
+logs/
 .env*
 !.env.example
 *.log
